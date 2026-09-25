@@ -1,0 +1,9 @@
+{
+  "redirects": [{ "source": "/", "destination": "/ironlog/", "permanent": false }],
+  "rewrites": [
+    { "source": "/ironlog", "destination": "/index.html" },
+    { "source": "/ironlog/", "destination": "/index.html" },
+    { "source": "/ironlog/:path+", "destination": "/:path+" }
+  ],
+  "headers": [{ "source": "/sw.js", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }]
+}
