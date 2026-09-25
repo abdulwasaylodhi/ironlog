@@ -1,5 +1,5 @@
-const CACHE = 'ironlog-v6';
-const ASSETS = ['./'];
+const CACHE = 'ironlog-v7';
+const ASSETS = ['./', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
@@ -14,16 +14,37 @@ self.addEventListener('activate', e => {
   );
 });
 
+function cacheIfOk(req, res) {
+  if (res && res.status === 200 && res.type === 'basic') {
+    const clone = res.clone();
+    caches.open(CACHE).then(c => c.put(req, clone));
+  }
+  return res;
+}
+
 self.addEventListener('fetch', e => {
+  if (e.request.method !== 'GET') return;
+
+  // page loads: network first so a new deploy reaches people on their next open,
+  // falling back to the cached app shell when offline
+  if (e.request.mode === 'navigate') {
+    e.respondWith(
+      fetch(e.request)
+        .then(res => cacheIfOk('./', res))
+        .catch(() => caches.match('./'))
+    );
+    return;
+  }
+
+  // everything else: serve from cache instantly, refresh the cached copy in the background
   e.respondWith(
-    caches.match(e.request).then(r => {
-      if (r) return r;
-      return fetch(e.request).then(res => {
-        if (!res || res.status !== 200 || res.type !== 'basic') return res;
-        const clone = res.clone();
-        caches.open(CACHE).then(c => c.put(e.request, clone));
-        return res;
-      }).catch(() => caches.match('./'));
+    caches.match(e.request).then(cached => {
+      const network = fetch(e.request).then(res => cacheIfOk(e.request, res));
+      if (cached) {
+        network.catch(() => {});
+        return cached;
+      }
+      return network.catch(() => caches.match('./'));
     })
   );
 });
