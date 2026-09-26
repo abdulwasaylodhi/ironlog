@@ -779,6 +779,24 @@ function save(){
     return false;
   }
 }
+const LB_TO_KG = 0.45359237;
+/* lb is kept to 0.01. kg gets 0.01 too when that converts back to the exact same
+   lb value, otherwise 0.001 (135 lb → 61.235 kg, since 61.23 would come back as
+   134.99). That way switching units back and forth never drifts the numbers. */
+function convertWeight(w, factor){
+  if(!w) return w;
+  const r2 = (x)=>Math.round(x*100)/100;
+  if(factor > 1) return r2(w*factor);
+  const kg = r2(w*factor);
+  return r2(kg/factor)===w ? kg : Math.round(w*factor*1000)/1000;
+}
+function convertAllWeights(factor){
+  const convSets = (sets)=>sets.forEach(s=>{ s.weight = convertWeight(s.weight, factor); });
+  state.history.forEach(w=>w.exercises.forEach(e=>convSets(e.sets)));
+  state.routines.forEach(r=>r.exercises.forEach(e=>convSets(e.sets)));
+  if(state.activeWorkout) state.activeWorkout.exercises.forEach(e=>convSets(e.sets));
+  state.bodyweight.forEach(b=>{ b.weight = convertWeight(b.weight, factor); });
+}
 function uid(){ return Date.now().toString(36)+Math.random().toString(36).slice(2,7); }
 function allExercises(){ return BUILTIN_EXERCISES.concat(state.customExercises); }
 function exById(id){ return allExercises().find(e=>e.id===id); }
@@ -840,6 +858,22 @@ function bestE1RM(exId, beforeDate){
   return best;
 }
 
+/* re-derive isPR for every completed set of one exercise in a workout, in order.
+   Each set has to beat past history AND the sets already done earlier today, so
+   only a real new best gets the badge — and un-ticking or editing a set moves
+   the badge to whichever set now holds the record. */
+function recomputeWorkoutPRs(workout, exId){
+  let best = bestE1RM(exId);
+  for(const e of workout.exercises){
+    if(e.exerciseId!==exId) continue;
+    for(const s of e.sets){
+      const e1 = EPLEY(s.weight, s.reps);
+      s.isPR = s.completed && s.weight>0 && e1 > best;
+      if(s.isPR) best = e1;
+    }
+  }
+}
+
 function computeStreak(){
   const days = [...new Set(state.history.map(w=>localDateStr(w.date)))].sort().reverse();
   if(days.length===0) return 0;
@@ -888,7 +922,7 @@ function renderHome(){
       </div>
       <div style="text-align:right">
         <div class="faint" style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em">Total Volume</div>
-        <div class="disp mono" style="font-size:20px">${totalVolume.toLocaleString()}<span style="font-size:11px;color:var(--text-dim)"> ${state.settings.unit}</span></div>
+        <div class="disp mono" style="font-size:20px">${Math.round(totalVolume).toLocaleString()}<span style="font-size:11px;color:var(--text-dim)"> ${state.settings.unit}</span></div>
       </div>
     </div>
   </div>
@@ -949,6 +983,10 @@ function openRoutineEditor(routineId){
   const editing = routineId ? state.routines.find(r=>r.id===routineId) : null;
   let draft = editing ? JSON.parse(JSON.stringify(editing)) : {id:uid(), name:"", exercises:[]};
   draft.exercises = draft.exercises.map(migrateRoutineExercise);
+  /* the exercise picker and custom-exercise form open inside this same modal, so
+     the guard stays on through them and closing any of them asks first */
+  const original = JSON.stringify(draft);
+  modalCloseGuard = ()=>JSON.stringify(draft)===original || confirm("Discard changes to this routine?");
 
   function body(){
     return `
@@ -1028,6 +1066,7 @@ function openRoutineEditor(routineId){
       if(draft.exercises.length===0){ alert("Add at least one exercise."); return; }
       const idx = state.routines.findIndex(r=>r.id===draft.id);
       if(idx>=0) state.routines[idx]=draft; else state.routines.push(draft);
+      modalCloseGuard = null;
       save(); closeModal(); renderRoutines();
     };
     makeReorderable(list, ".rt-ex-block", draft.exercises, ()=>{ openModal(body()); wireRoutineEditorEvents(); });
@@ -1071,11 +1110,12 @@ function openExercisePicker(onPick){
 }
 
 function openCustomExerciseForm(onPick){
-  const cats = ["Chest","Back","Shoulders","Arms","Legs","Core","Cardio","Olympic","Other"];
+  /* same categories as the built-in list, so the picker's filter chips don't split */
+  const cats = [...new Set(BUILTIN_EXERCISES.map(e=>e.cat)), "Other"];
   openModal(`
     <div class="modal-title">Custom Exercise<span class="x" id="mClose">&times;</span></div>
     <div class="field"><label>Name</label><input id="ceName" type="text" placeholder="e.g. Cable Pullover"></div>
-    <div class="field"><label>Category</label><select id="ceCat">${cats.map(c=>`<option>${c}</option>`).join("")}</select></div>
+    <div class="field"><label>Category</label><select id="ceCat">${cats.map(c=>`<option>${escapeHtml(c)}</option>`).join("")}</select></div>
     <button class="btn btn-primary btn-block" id="ceSave">Add Exercise</button>
   `);
   document.getElementById("mClose").onclick = closeModal;
@@ -1247,29 +1287,38 @@ function renderWorkoutBody(){
 
   document.getElementById("woAddExBtn")?.addEventListener("click", addExToActive);
 
+  /* editing a completed set can change which set holds the PR. Not re-rendering
+     here on purpose: this fires on blur, and swapping the DOM then would eat the
+     tap that caused the blur. Badges catch up on the next render. */
+  function onSetEdited(ei, si){
+    if(w.exercises[ei].sets[si].completed) recomputeWorkoutPRs(w, w.exercises[ei].exerciseId);
+    save();
+  }
   body.querySelectorAll(".wInput").forEach(inp=>inp.onchange=(e)=>{
-    w.exercises[inp.dataset.ei].sets[inp.dataset.si].weight = parseFloat(inp.value)||0; save();
+    w.exercises[inp.dataset.ei].sets[inp.dataset.si].weight = parseFloat(inp.value)||0;
+    onSetEdited(inp.dataset.ei, inp.dataset.si);
   });
   body.querySelectorAll(".rInput").forEach(inp=>inp.onchange=(e)=>{
-    w.exercises[inp.dataset.ei].sets[inp.dataset.si].reps = parseInt(inp.value)||0; save();
+    w.exercises[inp.dataset.ei].sets[inp.dataset.si].reps = parseInt(inp.value)||0;
+    onSetEdited(inp.dataset.ei, inp.dataset.si);
   });
   body.querySelectorAll(".toggleSet").forEach(b=>b.onclick=()=>{
     const ei=b.dataset.ei, si=b.dataset.si;
     const set = w.exercises[ei].sets[si];
     set.completed = !set.completed;
+    recomputeWorkoutPRs(w, w.exercises[ei].exerciseId);
     if(set.completed){
-      const exId = w.exercises[ei].exerciseId;
-      const best = bestE1RM(exId);
-      const e1 = EPLEY(set.weight, set.reps);
-      set.isPR = set.weight>0 && e1 > best;
       soundSetDone(set.isPR);
       startRestTimer(w.exercises[ei].restSeconds || state.settings.restSeconds, ei);
-    } else { set.isPR = false; soundSetUndo(); }
+    } else { soundSetUndo(); }
     save(); renderWorkoutBody();
     if(!set.completed) refreshWorkoutNotification();
   });
   body.querySelectorAll(".rmSet").forEach(b=>b.onclick=()=>{
-    w.exercises[b.dataset.ei].sets.splice(b.dataset.si,1); save(); renderWorkoutBody();
+    const exObj = w.exercises[b.dataset.ei];
+    exObj.sets.splice(b.dataset.si,1);
+    recomputeWorkoutPRs(w, exObj.exerciseId);
+    save(); renderWorkoutBody();
     refreshWorkoutNotification();
   });
   body.querySelectorAll(".addSetBtn").forEach(b=>b.onclick=()=>{
@@ -1351,6 +1400,7 @@ document.getElementById("woFinish").onclick = ()=>{
   const totalSets = w.exercises.reduce((s,e)=>s+e.sets.filter(s2=>s2.completed).length,0);
   if(totalSets===0){ if(!confirm("No sets completed. Finish anyway?")) return; }
   w.duration = Math.floor((Date.now()-w.startedAt)/1000);
+  delete w.rest;
   w.exercises = w.exercises.filter(e=>e.sets.some(s=>s.completed)).map(e=>({...e, sets:e.sets.filter(s=>s.completed)}));
 
   const sourceRoutine = w.routineId ? state.routines.find(r=>r.id===w.routineId) : null;
@@ -1410,13 +1460,22 @@ if(state.activeWorkout){
 
 let restEndTime = 0, restTotal = 0, _lastCountdownSecond = null, _isResting = false;
 
-function startRestTimer(seconds){
+/* the rest countdown is kept on the active workout so a reload mid-rest resumes it */
+function persistRest(){
+  if(!state.activeWorkout) return;
+  state.activeWorkout.rest = _isResting ? {endTime:restEndTime, total:restTotal} : null;
+  save();
+}
+
+function startRestTimer(seconds, opts){
+  opts = opts || {};
   restTotal = seconds;
-  restEndTime = Date.now() + seconds*1000;
+  restEndTime = opts.endTime || (Date.now() + seconds*1000);
   _lastCountdownSecond = null;
   _isResting = true;
+  persistRest();
   document.getElementById("restTimer").classList.add("open");
-  soundRestStart();
+  if(!opts.resumed) soundRestStart();
   clearInterval(restInterval);
   tickRest();
   /* tick every 250ms so the UI is smooth, but always compute remaining
@@ -1456,13 +1515,23 @@ function stopRestTimer(opts){
   document.getElementById("restTimer").classList.remove("open");
   document.title = "IronLog";
   _isResting = false;
+  persistRest();
   refreshWorkoutNotification({alert: !!opts.alert});
 }
 
 function addRestTime(sec){
   restEndTime += sec*1000;
   restTotal += sec;
+  persistRest();
   tickRest();
+}
+
+/* resume a rest that was running when the page was closed or reloaded; one that
+   ran out while the app was closed is just dropped, with no late "done" ping */
+if(state.activeWorkout && state.activeWorkout.rest){
+  const r = state.activeWorkout.rest;
+  if(Number(r.endTime) > Date.now()) startRestTimer(Number(r.total)||0, {endTime:Number(r.endTime), resumed:true});
+  else { state.activeWorkout.rest = null; save(); }
 }
 
 document.getElementById("restSkip").onclick = ()=>stopRestTimer({alert:false});
@@ -1565,9 +1634,7 @@ function completeNextSetFromNotification(){
   if(!pending) return;
   const {exObj, nextSet} = pending;
   nextSet.completed = true;
-  const best = bestE1RM(exObj.exerciseId);
-  const e1 = EPLEY(nextSet.weight, nextSet.reps);
-  nextSet.isPR = nextSet.weight>0 && e1 > best;
+  recomputeWorkoutPRs(state.activeWorkout, exObj.exerciseId);
   soundSetDone(nextSet.isPR);
   save();
   if(document.getElementById("workoutOverlay").classList.contains("open")) renderWorkoutBody();
@@ -1606,7 +1673,7 @@ function renderHistory(){
     return `<div class="card card-tap hist-card" data-id="${escapeAttr(w.id)}">
       <div class="row"><div style="font-weight:700">${escapeHtml(w.name)} ${hasPR?'<span class="pr-badge">PR</span>':""}</div>
       <div class="faint" style="font-size:12px">${fmtDate(w.date)}</div></div>
-      <div class="muted" style="font-size:12.5px;margin-top:4px">${w.exercises.length} exercises · ${vol.toLocaleString()} ${state.settings.unit} · ${Math.round((w.duration||0)/60)} min</div>
+      <div class="muted" style="font-size:12.5px;margin-top:4px">${w.exercises.length} exercises · ${Math.round(vol).toLocaleString()} ${state.settings.unit} · ${Math.round((w.duration||0)/60)} min</div>
     </div>`;
   }).join("");
   if(sorted.length===0) list = `<div class="empty-state faint">No workouts logged yet.</div>`;
@@ -1787,7 +1854,16 @@ function renderSettings(){
   </div>
   <div class="faint" style="text-align:center;font-size:11.5px;margin-top:20px">IRONLOG · fully offline · your data never leaves this device</div>
   `;
-  document.getElementById("unitSelect").onchange = (e)=>{ state.settings.unit=e.target.value; save(); };
+  document.getElementById("unitSelect").onchange = (e)=>{
+    const from = state.settings.unit, to = e.target.value;
+    if(from===to) return;
+    /* OK converts every stored weight; Cancel only relabels, for anyone whose
+       numbers were already logged in the new unit under the wrong label */
+    if(confirm(`Convert all your saved weights from ${from} to ${to}?\n\nOK = convert the numbers\nCancel = keep the numbers, just change the label`)){
+      convertAllWeights(from==="lb" ? LB_TO_KG : 1/LB_TO_KG);
+    }
+    state.settings.unit = to; save();
+  };
   document.getElementById("restSelect").onchange = (e)=>{ state.settings.restSeconds=parseInt(e.target.value)||90; save(); };
   document.getElementById("exportBtn").onclick = ()=>{
     const blob = new Blob([JSON.stringify(state,null,2)],{type:"application/json"});
@@ -1826,7 +1902,13 @@ function openModal(html){
   document.getElementById("modalSheet").innerHTML = html;
   document.getElementById("modalBg").classList.add("open");
 }
-function closeModal(){ document.getElementById("modalBg").classList.remove("open"); }
+/* set while a modal holds unsaved work; returns false to keep the modal open */
+let modalCloseGuard = null;
+function closeModal(){
+  if(modalCloseGuard && !modalCloseGuard()) return;
+  modalCloseGuard = null;
+  document.getElementById("modalBg").classList.remove("open");
+}
 document.getElementById("modalBg").addEventListener("click",(e)=>{ if(e.target.id==="modalBg") closeModal(); });
 
 function escapeHtml(s){ return String(s??"").replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
