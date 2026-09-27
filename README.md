@@ -2,7 +2,7 @@
 
 An offline-first workout tracker for weightlifting. One HTML file, no dependencies, no accounts, no servers — your training data stays in your browser.
 
-**[Open the app →](https://abdulwasaylodhi.github.io/ironlog/)**
+**[Open the app →](https://ironlog-nivert.vercel.app/ironlog/)**
 
 ---
 
@@ -124,15 +124,8 @@ Works in any modern browser. Two caveats:
 
 ## Roadmap
 
-- Per-exercise progress charts
-- Plate calculator
-- Supersets
-- Richer workout history filtering
+- quality of life features are going to be coming soon.
 
 ## Contributing
 
 Issues and pull requests are welcome. Since the app is a single file, keep changes focused and describe what you changed and why.
-
-## License
-
-MIT
